@@ -99,8 +99,7 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                # The --query properties.outputs.mlWorkspaceName.value gets the workspace name from the Bicep output
-                # and saves it to a pipeline variable named 'workspaceName' for the smoke test.
+                echo "Starting Bicep deployment..."
                 WORKSPACE_NAME=$(az deployment group create \
                   --resource-group ${{ parameters.RESOURCE_GROUP }} \
                   --template-file ${{ parameters.templateML }} \
@@ -108,9 +107,18 @@ stages:
                   --query properties.outputs.mlWorkspaceName.value \
                   -o tsv)
                 
-                # This is the special syntax to create a pipeline variable for the next stage
+                # NEW: Print the captured name to see what the deployment returned
+                echo "Captured Workspace Name from Bicep output: '$WORKSPACE_NAME'"
+
+                # NEW: Check if the variable is empty before trying to send it
+                if [ -z "$WORKSPACE_NAME" ]; then
+                  echo "##[error]🔥 FAILED to get workspace name from deployment output. The deployment itself likely failed or produced no output."
+                  exit 1
+                fi
+                
+                echo "Setting pipeline output variable 'workspaceName' to be sent to the next stage..."
                 echo "##vso[task.setvariable variable=workspaceName;isOutput=true]$WORKSPACE_NAME"
-              name: 'bicepDeployment' # Giving the step a name to reference its output
+              name: 'bicepDeployment'
 
   # --- COMPLETELY REVISED SMOKE TEST ---
   - stage: SmokeTest
@@ -131,6 +139,15 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
+                echo "--- Starting Smoke Test ---"
+                echo "Value of WORKSPACE_NAME variable received by this stage is: '$(WORKSPACE_NAME)'"
+
+                # NEW: Check if the variable is empty right at the start
+                if [ -z "$(WORKSPACE_NAME)" ]; then
+                  echo "##[error]🔥 The WORKSPACE_NAME variable arrived EMPTY. The value was not passed correctly from the Deploy stage."
+                  exit 1
+                fi
+
                 echo "Checking for Azure ML Workspace: $(WORKSPACE_NAME)"
                 if az ml workspace show --name "$(WORKSPACE_NAME)" --resource-group "${{ parameters.RESOURCE_GROUP }}" &> /dev/null; then
                   echo "✅ SUCCESS: Azure ML Workspace '$(WORKSPACE_NAME)' exists."
