@@ -1,0 +1,105 @@
+# Parameters passed from the main pipeline file
+parameters:
+  - name: RESOURCE_GROUP
+    type: string
+  - name: storageAccountName
+    type: string
+  - name: keyVaultName
+    type: string
+  - name: appInsightsName
+    type: string
+  - name: containerRegistryName
+    type: string
+  - name: service_conn
+    type: string
+  - name: location
+    type: string
+
+jobs:
+  - job: CheckResourceNames
+    displayName: 'Check Resource Names'
+    steps:
+      # This task checks if the resource group exists and creates it if not.
+      - task: AzureCLI@2
+        displayName: 'Check or Create Resource Group'
+        inputs:
+          azureSubscription: '${{ parameters.service_conn }}'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            echo "Checking if resource group '${{ parameters.RESOURCE_GROUP }}' exists..."
+            exists=$(az group exists --name ${{ parameters.RESOURCE_GROUP }})
+            echo "az returned: $exists"
+            if [ "$exists" = "false" ]; then
+              echo "##[warning] Resource group does not exist. Creating it now..."
+              az group create --name ${{ parameters.RESOURCE_GROUP }} --location ${{ parameters.location }} --only-show-errors
+            else
+              echo "Resource group '${{ parameters.RESOURCE_GROUP }}' already exists."
+            fi
+
+      # This task checks if the storage account name is globally available.
+      - task: AzureCLI@2
+        displayName: 'Check Storage Account Name Availability'
+        inputs:
+          azureSubscription: '${{ parameters.service_conn }}'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            available=$(az storage account check-name --name ${{ parameters.storageAccountName }} --query nameAvailable -o tsv)
+            if [ "$available" = "false" ]; then
+              echo "##[error] Storage account name '${{ parameters.storageAccountName }}' is not available. Please choose a different name."
+              exit 1
+            else
+              echo "Storage account name '${{ parameters.storageAccountName }}' is available."
+            fi
+
+      # This task checks if a Key Vault with the given name already exists in the subscription.
+      - task: AzureCLI@2
+        displayName: 'Check Key Vault Name Availability'
+        inputs:
+          azureSubscription: '${{ parameters.service_conn }}'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Try to show the keyvault. If the command succeeds (exit code 0), the name is taken.
+            az keyvault show --name ${{ parameters.keyVaultName }} --resource-group ${{ parameters.RESOURCE_GROUP }} &>/dev/null
+            if [ $? -eq 0 ]; then
+              echo "##[error]Key Vault name '${{ parameters.keyVaultName }}' is already in use within this resource group. Please choose a different name."
+              exit 1
+            else
+              echo "Key Vault name '${{ parameters.keyVaultName }}' is available."
+            fi
+
+      # This task checks if an Application Insights instance with the given name already exists.
+      - task: AzureCLI@2
+        displayName: 'Check App Insights Name Availability'
+        inputs:
+          azureSubscription: '${{ parameters.service_conn }}'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Try to show the component. If the command succeeds, the name is taken.
+            az monitor app-insights component show --app ${{ parameters.appInsightsName }} --resource-group ${{ parameters.RESOURCE_GROUP }} &>/dev/null
+            if [ $? -eq 0 ]; then
+              echo "##[error]Application Insights name '${{ parameters.appInsightsName }}' already exists in this resource group. Please choose a different name."
+              exit 1
+            else
+              echo "Application Insights name '${{ parameters.appInsightsName }}' is available."
+            fi
+  
+      # It checks if a Container Registry with the given name already exists.
+      - task: AzureCLI@2
+        displayName: 'Check Container Registry Name Availability'
+        inputs:
+          azureSubscription: '${{ parameters.service_conn }}'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Try to show the registry. If the command succeeds, the name is taken.
+            az acr show --name ${{ parameters.containerRegistryName }} --resource-group ${{ parameters.RESOURCE_GROUP }} &>/dev/null
+            if [ $? -eq 0 ]; then
+              echo "##[error]Container Registry name '${{ parameters.containerRegistryName }}' already exists in this resource group. Please choose a different name."
+              exit 1
+            else
+              echo "Container Registry name '${{ parameters.containerRegistryName }}' is available."
+            fi

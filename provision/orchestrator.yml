@@ -1,0 +1,168 @@
+trigger: none
+
+parameters:
+  - name: location
+    type: string
+    default: 'westus'
+  - name: RESOURCE_GROUP
+    type: string
+    default: 'projArthurReis'
+  - name: baseName
+    type: string
+    default: 'mlops'
+  - name: templateML
+    type: string
+    default: 'provision/bicep_files/AML_provision.bicep'
+
+variables:
+  - group: Arthur_VG # Contains service_conn and subscription_id
+
+stages:
+  # This stage is a good first check, but it's redundant if your Bicep file generates unique names.
+  # I've left it in as it can be useful for pre-flight checks.
+  - stage: CheckResources
+    displayName: 'Check Initial Resource Names Stage'
+    jobs:
+      - template: 1_checking_names/check-resource-names.yml
+        parameters:
+          # Note: These parameters are for the initial check only. The Bicep file will generate the final names.
+          RESOURCE_GROUP: ${{ parameters.RESOURCE_GROUP }}
+          storageAccountName: '${{ parameters.baseName }}$(Build.BuildId)' # Example of a unique name for check
+          keyVaultName: '${{ parameters.baseName }}kv$(Build.BuildId)'
+          appInsightsName: '${{ parameters.baseName }}ai$(Build.BuildId)'
+          containerRegistryName: '${{ parameters.baseName }}acr$(Build.BuildId)'
+          service_conn: '$(service_conn)'
+          location: ${{ parameters.location }}
+
+  # The Lint stage correctly checks Bicep syntax. No changes needed.
+  - stage: Lint
+    displayName: 'Lint Bicep Code'
+    jobs:
+      - job: LintBicep
+        displayName: 'Lint Bicep Files'
+        steps:
+          - script: az bicep build --file ${{ parameters.templateML }}
+            displayName: 'Lint Azure Machine Learning Bicep Template'
+
+  # CORRECTED: This stage now passes only the 'baseName' parameter, as the Bicep file handles the rest.
+  - stage: ValidateDeployment
+    displayName: 'Validate Bicep Deployment'
+    jobs:
+      - job: ValidateBicep
+        displayName: 'Validate Bicep Template'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Validate Azure ML Template'
+            inputs:
+              azureSubscription: '$(service_conn)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Validating Azure Machine Learning deployment..."
+                az deployment group validate \
+                  --resource-group ${{ parameters.RESOURCE_GROUP }} \
+                  --template-file ${{ parameters.templateML }} \
+                  --parameters baseName='${{ parameters.baseName }}' \
+                  --debug
+
+  # CORRECTED: What-If also simplified to use 'baseName'.
+  - stage: WhatIfOperation
+    displayName: 'Run What-If Deployment'
+    jobs:
+      - job: WhatIfJob
+        displayName: 'What-If for Azure ML Deployment'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'What-If for Azure ML Template'
+            inputs:
+              azureSubscription: '$(service_conn)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Running What-If for Azure Machine Learning deployment..."
+                az deployment group what-if \
+                  --resource-group ${{ parameters.RESOURCE_GROUP }} \
+                  --template-file ${{ parameters.templateML }} \
+                  --parameters baseName='${{ parameters.baseName }}'
+
+  # CORRECTED: Deploy stage also simplified.
+  - stage: Deploy
+    displayName: 'Deploy Azure ML Resources'
+    jobs:
+      - job: DeployResources
+        displayName: 'Deploy Azure ML Environment'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Deploy Azure Machine Learning Bicep Template'
+            inputs:
+              azureSubscription: '$(service_conn)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # The --query properties.outputs.mlWorkspaceName.value gets the workspace name from the Bicep output
+                # and saves it to a pipeline variable named 'workspaceName' for the smoke test.
+                WORKSPACE_NAME=$(az deployment group create \
+                  --resource-group ${{ parameters.RESOURCE_GROUP }} \
+                  --template-file ${{ parameters.templateML }} \
+                  --parameters baseName='${{ parameters.baseName }}' \
+                  --query properties.outputs.mlWorkspaceName.value \
+                  -o tsv)
+                
+                # This is the special syntax to create a pipeline variable for the next stage
+                echo "##vso[task.setvariable variable=workspaceName;isOutput=true]$WORKSPACE_NAME"
+              name: 'bicepDeployment' # Giving the step a name to reference its output
+
+  # --- COMPLETELY REVISED SMOKE TEST ---
+  - stage: SmokeTest
+    displayName: 'Smoke Test Deployed Resources'
+    dependsOn: Deploy # This stage runs only if Deploy succeeds
+    condition: succeeded()
+    jobs:
+      - job: SmokeTestJob
+        displayName: 'Check Azure ML Resources'
+        variables:
+          # This maps the output variable from the previous stage to a variable in this job
+          WORKSPACE_NAME: $[ stageDependencies.Deploy.DeployResources.outputs['bicepDeployment.workspaceName'] ]
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Check Azure ML Workspace Exists'
+            inputs:
+              azureSubscription: '$(service_conn)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Checking for Azure ML Workspace: $(WORKSPACE_NAME)"
+                if az ml workspace show --name "$(WORKSPACE_NAME)" --resource-group "${{ parameters.RESOURCE_GROUP }}" &> /dev/null; then
+                  echo "✅ SUCCESS: Azure ML Workspace '$(WORKSPACE_NAME)' exists."
+                else
+                  echo "##[error]🔥 ERROR: Azure ML Workspace '$(WORKSPACE_NAME)' does not exist or could not be found."
+                  exit 1
+                fi
+          
+          - task: AzureCLI@2
+            displayName: 'Verify Associated Resources'
+            inputs:
+              azureSubscription: '$(service_conn)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Get the names of the associated resources from the ML Workspace properties
+                echo "Verifying associated resources for workspace $(WORKSPACE_NAME)..."
+                KEYVAULT_NAME=$(az ml workspace show --name "$(WORKSPACE_NAME)" -g "${{ parameters.RESOURCE_GROUP }}" --query 'key_vault' -o tsv | xargs basename)
+                STORAGE_ACCOUNT_NAME=$(az ml workspace show --name "$(WORKSPACE_NAME)" -g "${{ parameters.RESOURCE_GROUP }}" --query 'storage_account' -o tsv | xargs basename)
+
+                echo "Checking for Key Vault: $KEYVAULT_NAME"
+                if az keyvault show --name "$KEYVAULT_NAME" -g "${{ parameters.RESOURCE_GROUP }}" &> /dev/null; then
+                  echo "✅ SUCCESS: Key Vault '$KEYVAULT_NAME' is associated correctly."
+                else
+                  echo "##[error]🔥 ERROR: Key Vault '$KEYVAULT_NAME' could not be found."
+                  exit 1
+                fi
+
+                echo "Checking for Storage Account: $STORAGE_ACCOUNT_NAME"
+                if az storage account show --name "$STORAGE_ACCOUNT_NAME" -g "${{ parameters.RESOURCE_GROUP }}" &> /dev/null; then
+                  echo "✅ SUCCESS: Storage Account '$STORAGE_ACCOUNT_NAME' is associated correctly."
+                else
+                  echo "##[error]🔥 ERROR: Storage Account '$STORAGE_ACCOUNT_NAME' could not be found."
+                  exit 1
+                fi
