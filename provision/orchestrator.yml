@@ -116,17 +116,21 @@ stages:
               name: 'bicepDeployment' # Giving the step a name to reference its output
 
   # --- COMPLETELY REVISED SMOKE TEST ---
+  # --- CORRECTED SMOKE TEST STAGE ---
   - stage: SmokeTest
     displayName: 'Smoke Test Deployed Resources'
-    dependsOn: Deploy # This stage runs only if Deploy succeeds
+    dependsOn: Deploy
     condition: succeeded()
     jobs:
       - job: SmokeTestJob
         displayName: 'Check Azure ML Resources'
         variables:
-          # This maps the output variable from the previous stage to a variable in this job
+          # Define the variable ONCE at the job level.
+          # This makes it available to all tasks below.
           WORKSPACE_NAME: $[ stageDependencies.Deploy.DeployResources.outputs['bicepDeployment.workspaceName'] ]
+
         steps:
+          # This task now uses the job-level variable
           - task: AzureCLI@2
             displayName: 'Check Azure ML Workspace Exists'
             inputs:
@@ -135,22 +139,17 @@ stages:
               scriptLocation: 'inlineScript'
               inlineScript: |
                 echo "--- Starting Smoke Test ---"
-                echo "Value of WORKSPACE_NAME variable received by this stage is: '$(WORKSPACE_NAME)'"
+                echo "Value of variable received by this job is: '$(WORKSPACE_NAME)'"
 
-                # NEW: Check if the variable is empty right at the start
                 if [ -z "$(WORKSPACE_NAME)" ]; then
-                  echo "##[error]🔥 The WORKSPACE_NAME variable arrived EMPTY. The value was not passed correctly from the Deploy stage."
+                  echo "##[error]🔥 The WORKSPACE_NAME variable is empty. Check the stage/job/step names in the 'stageDependencies' path."
                   exit 1
                 fi
 
                 echo "Checking for Azure ML Workspace: $(WORKSPACE_NAME)"
-                if az ml workspace show --name "$(WORKSPACE_NAME)" --resource-group "${{ parameters.RESOURCE_GROUP }}" &> /dev/null; then
-                  echo "✅ SUCCESS: Azure ML Workspace '$(WORKSPACE_NAME)' exists."
-                else
-                  echo "##[error]🔥 ERROR: Azure ML Workspace '$(WORKSPACE_NAME)' does not exist or could not be found."
-                  exit 1
-                fi
+                az ml workspace show --name "$(WORKSPACE_NAME)" --resource-group "${{ parameters.RESOURCE_GROUP }}"
           
+          # This task can now ALSO access the job-level variable
           - task: AzureCLI@2
             displayName: 'Verify Associated Resources'
             inputs:
@@ -158,7 +157,7 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                # Get the names of the associated resources from the ML Workspace properties
+                # This script now works correctly because $(WORKSPACE_NAME) is defined.
                 echo "Verifying associated resources for workspace $(WORKSPACE_NAME)..."
                 KEYVAULT_NAME=$(az ml workspace show --name "$(WORKSPACE_NAME)" -g "${{ parameters.RESOURCE_GROUP }}" --query 'key_vault' -o tsv | xargs basename)
                 STORAGE_ACCOUNT_NAME=$(az ml workspace show --name "$(WORKSPACE_NAME)" -g "${{ parameters.RESOURCE_GROUP }}" --query 'storage_account' -o tsv | xargs basename)
