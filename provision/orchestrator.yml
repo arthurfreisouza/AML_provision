@@ -9,7 +9,7 @@ parameters:
     default: 'projArthurReis'
   - name: baseName
     type: string
-    default: 'armlops'
+    default: 'a mlops'
   - name: templateML
     type: string
     default: 'provision/bicep_files/AML_provision.bicep'
@@ -106,9 +106,12 @@ stages:
                   --parameters baseName='${{ parameters.baseName }}' \
                   --query properties.outputs.mlWorkspaceName.value \
                   -o tsv)
-                
+
+                # FIX: Create the directory before writing the file
+                mkdir -p $(Pipeline.Workspace)/bicep_output
                 # Write the name to a file in the agent's artifact staging directory
                 echo $WORKSPACE_NAME > $(Pipeline.Workspace)/bicep_output/workspace_name.txt
+
               name: 'bicepDeployment'
 
           # Publish the directory containing the file as an artifact
