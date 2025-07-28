@@ -94,14 +94,12 @@ stages:
         displayName: 'Deploy Azure ML Environment'
         steps:
           - task: AzureCLI@2
-            displayName: 'Deploy Azure Machine Learning Bicep Template'
+            displayName: 'Deploy and Get Workspace Name'
             inputs:
               azureSubscription: '$(service_conn)'
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                # The --query properties.outputs.mlWorkspaceName.value gets the workspace name from the Bicep output
-                # and saves it to a pipeline variable named 'workspaceName' for the smoke test.
                 WORKSPACE_NAME=$(az deployment group create \
                   --resource-group ${{ parameters.RESOURCE_GROUP }} \
                   --template-file ${{ parameters.templateML }} \
@@ -109,11 +107,16 @@ stages:
                   --query properties.outputs.mlWorkspaceName.value \
                   -o tsv)
                 
-                # Printing the workspace name for debugging
-                echo "Deployed Azure ML Workspace Name: $WORKSPACE_NAME"
-                # This is the special syntax to create a pipeline variable for the next stage
-                echo "##vso[task.setvariable variable=workspaceName;isOutput=true]$WORKSPACE_NAME"
-              name: 'bicepDeployment' # Giving the step a name to reference its output
+                # Write the name to a file in the agent's artifact staging directory
+                echo $WORKSPACE_NAME > $(Pipeline.Workspace)/bicep_output/workspace_name.txt
+              name: 'bicepDeployment'
+
+          # Publish the directory containing the file as an artifact
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Workspace Name Artifact'
+            inputs:
+              targetPath: '$(Pipeline.Workspace)/bicep_output'
+              artifact: 'bicep_outputs' # Name of the artifact
 
   # --- COMPLETELY REVISED SMOKE TEST ---
   # --- CORRECTED SMOKE TEST STAGE ---
@@ -124,13 +127,15 @@ stages:
     jobs:
       - job: SmokeTestJob
         displayName: 'Check Azure ML Resources'
-        variables:
-          # Define the variable ONCE at the job level.
-          # This makes it available to all tasks below.
-          WORKSPACE_NAME: $[ stageDependencies.Deploy.DeployResources.outputs['bicepDeployment.workspaceName'] ]
-
         steps:
-          # This task now uses the job-level variable
+          # Download the artifact published by the Deploy stage
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Workspace Name Artifact'
+            inputs:
+              artifactName: 'bicep_outputs'
+              downloadPath: '$(Pipeline.Workspace)/bicep_output'
+
+          # This task checks if the main ML Workspace exists
           - task: AzureCLI@2
             displayName: 'Check Azure ML Workspace Exists'
             inputs:
@@ -138,18 +143,22 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                echo "--- Starting Smoke Test ---"
-                echo "Value of variable received by this job is: '$(WORKSPACE_NAME)'"
+                # Read the workspace name from the downloaded file
+                WORKSPACE_NAME=$(cat $(Pipeline.Workspace)/bicep_output/workspace_name.txt)
 
-                if [ -z "$(WORKSPACE_NAME)" ]; then
-                  echo "##[error]🔥 The WORKSPACE_NAME variable is empty. Check the stage/job/step names in the 'stageDependencies' path."
+                echo "--- Starting Smoke Test ---"
+                echo "Value of variable read from artifact is: '$WORKSPACE_NAME'"
+
+                if [ -z "$WORKSPACE_NAME" ]; then
+                  echo "##[error]🔥 Could not read workspace name from artifact file."
                   exit 1
                 fi
 
-                echo "Checking for Azure ML Workspace: $(WORKSPACE_NAME)"
-                az ml workspace show --name "$(WORKSPACE_NAME)" --resource-group "${{ parameters.RESOURCE_GROUP }}"
+                echo "Checking for Azure ML Workspace: $WORKSPACE_NAME"
+                # This command will fail the step if the workspace doesn't exist
+                az ml workspace show --name "$WORKSPACE_NAME" --resource-group "${{ parameters.RESOURCE_GROUP }}"
           
-          # This task can now ALSO access the job-level variable
+          # This task verifies the existence of resources linked to the workspace
           - task: AzureCLI@2
             displayName: 'Verify Associated Resources'
             inputs:
@@ -157,10 +166,17 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                # This script now works correctly because $(WORKSPACE_NAME) is defined.
-                echo "Verifying associated resources for workspace $(WORKSPACE_NAME)..."
-                KEYVAULT_NAME=$(az ml workspace show --name "$(WORKSPACE_NAME)" -g "${{ parameters.RESOURCE_GROUP }}" --query 'key_vault' -o tsv | xargs basename)
-                STORAGE_ACCOUNT_NAME=$(az ml workspace show --name "$(WORKSPACE_NAME)" -g "${{ parameters.RESOURCE_GROUP }}" --query 'storage_account' -o tsv | xargs basename)
+                # Each task must read the file independently
+                WORKSPACE_NAME=$(cat $(Pipeline.Workspace)/bicep_output/workspace_name.txt)
+                
+                if [ -z "$WORKSPACE_NAME" ]; then
+                  echo "##[error]🔥 Could not read workspace name from artifact file."
+                  exit 1
+                fi
+
+                echo "Verifying associated resources for workspace $WORKSPACE_NAME..."
+                KEYVAULT_NAME=$(az ml workspace show --name "$WORKSPACE_NAME" -g "${{ parameters.RESOURCE_GROUP }}" --query 'key_vault' -o tsv | xargs basename)
+                STORAGE_ACCOUNT_NAME=$(az ml workspace show --name "$WORKSPACE_NAME" -g "${{ parameters.RESOURCE_GROUP }}" --query 'storage_account' -o tsv | xargs basename)
 
                 echo "Checking for Key Vault: $KEYVAULT_NAME"
                 if az keyvault show --name "$KEYVAULT_NAME" -g "${{ parameters.RESOURCE_GROUP }}" &> /dev/null; then
