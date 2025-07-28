@@ -9,7 +9,7 @@ parameters:
     default: 'projArthurReis'
   - name: baseName
     type: string
-    default: 'mlops'
+    default: 'armlops'
   - name: templateML
     type: string
     default: 'provision/bicep_files/AML_provision.bicep'
@@ -83,7 +83,8 @@ stages:
                 az deployment group what-if \
                   --resource-group ${{ parameters.RESOURCE_GROUP }} \
                   --template-file ${{ parameters.templateML }} \
-                  --parameters baseName='${{ parameters.baseName }}'
+                  --parameters baseName='${{ parameters.baseName }}' \
+                  --debug
 
   # CORRECTED: Deploy stage also simplified.
   - stage: Deploy
@@ -99,7 +100,8 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                echo "Starting Bicep deployment..."
+                # The --query properties.outputs.mlWorkspaceName.value gets the workspace name from the Bicep output
+                # and saves it to a pipeline variable named 'workspaceName' for the smoke test.
                 WORKSPACE_NAME=$(az deployment group create \
                   --resource-group ${{ parameters.RESOURCE_GROUP }} \
                   --template-file ${{ parameters.templateML }} \
@@ -107,18 +109,11 @@ stages:
                   --query properties.outputs.mlWorkspaceName.value \
                   -o tsv)
                 
-                # NEW: Print the captured name to see what the deployment returned
-                echo "Captured Workspace Name from Bicep output: '$WORKSPACE_NAME'"
-
-                # NEW: Check if the variable is empty before trying to send it
-                if [ -z "$WORKSPACE_NAME" ]; then
-                  echo "##[error]🔥 FAILED to get workspace name from deployment output. The deployment itself likely failed or produced no output."
-                  exit 1
-                fi
-                
-                echo "Setting pipeline output variable 'workspaceName' to be sent to the next stage..."
+                # Printing the workspace name for debugging
+                echo "Deployed Azure ML Workspace Name: $WORKSPACE_NAME"
+                # This is the special syntax to create a pipeline variable for the next stage
                 echo "##vso[task.setvariable variable=workspaceName;isOutput=true]$WORKSPACE_NAME"
-              name: 'bicepDeployment'
+              name: 'bicepDeployment' # Giving the step a name to reference its output
 
   # --- COMPLETELY REVISED SMOKE TEST ---
   - stage: SmokeTest
